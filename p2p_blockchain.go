@@ -30,12 +30,23 @@ import (
 	ma "github.com/multiformats/go-multiaddr"
 )
 
-type TransactionType int 
+type TransactionType string 
 const(
-	DEBIT=iota
-	CREDIT
-	NEW_ACCOUNT
-	NONE
+	DEBIT="DEBIT"
+	CREDIT="CREDIT"
+	NEW_ACCOUNT="NEW_ACCOUNT"
+	NONE="NONE"
+)
+
+type Color string
+
+const (
+    ColorBlack  Color = "\u001b[30m"
+    ColorRed          = "\u001b[31m"
+    ColorGreen        = "\u001b[32m"
+    ColorYellow       = "\u001b[33m"
+    ColorBlue         = "\u001b[34m"
+    ColorReset        = "\u001b[0m"
 )
 
 type Block struct {
@@ -52,6 +63,8 @@ type Block struct {
 var Blockchain []Block
 
 var mutex = &sync.Mutex{}
+//var isCash *bool
+//var isRetail *bool
 
 func calculateHash(block Block) string {
 	record := string(block.Index) + block.Timestamp + string(block.UserId) + string(block.Balance) + string(block.Type) + block.PrevHash
@@ -103,15 +116,17 @@ func makeBasicHost(listenPort int, secio bool, randseed int64) (host.Host, error
 	fullAddr := addr.Encapsulate(hostAddr)
 	log.Printf("I am %s\n", fullAddr)
 	if secio {
-		log.Printf("Now run \"go run main.go -l %d -d %s -secio\" on a different terminal\n", listenPort+1, fullAddr)
+		log.Printf("Now run \"go run p2p_blockchain.go -l %d -d %s -secio\" on a different terminal.\n", listenPort+1, fullAddr)
 	} else {
-		log.Printf("Now run \"go run main.go -l %d -d %s\" on a different terminal\n", listenPort+1, fullAddr)
+		log.Printf("Now run \"go run p2p_blockchain.go -l %d -d %s\" on a different terminal.\n", listenPort+1, fullAddr)
 	}
 
 	return basicHost, nil
 }
 
 func handleStream(s net.Stream) {
+
+	colorize(ColorBlue,"HANDLESTREAM")
 
 	log.Println("Got a new stream!")
 
@@ -161,6 +176,8 @@ func readData(rw *bufio.ReadWriter) {
 
 func writeData(rw *bufio.ReadWriter) {
 
+	isCash:=true
+	firstcommand:=true
 	go func() {
 		for {
 			time.Sleep(5 * time.Second)
@@ -183,39 +200,175 @@ func writeData(rw *bufio.ReadWriter) {
 
 	for {
 		fmt.Print("> ")
+
 		sendData, err := stdReader.ReadString('\n')
 		if err != nil {
 			log.Fatal(err)
 		}
 
 		sendData = strings.Replace(sendData, "\n", "", -1)
-		bpm, err := strconv.Atoi(sendData)
-		if err != nil {
-			log.Fatal(err)
+
+		stringArray := strings.Fields(sendData)
+
+		//colorize(ColorBlue,"Debug1")
+		if firstcommand==true {
+			if stringArray[0]!="CASH" && stringArray[0]!="RETAIL" {
+				colorize(ColorRed,"Invalid command the first command has to be either 1. CASH or 2.) RETAIL . Try Again")
+			} else {
+				firstcommand=false
+				if stringArray[0]=="CASH" {
+					isCash=true
+					colorize(ColorBlue,"This became a Cash POS Terminal")
+				} else{
+					isCash=false
+					colorize(ColorBlue,"This became a Retail POS Terminal")
+				}
+			}
+
+		} else if isCash==true {
+			//colorize(ColorBlue,"Debug2")
+
+			if stringArray[0]!= "NEWUSER" && stringArray[0]!="RECHARGE" {
+				colorize(ColorRed,"Invalid Command. This is Cash POS. Valid commands are: 1.) NEWUSER 2.) RECHARGE $USERID $AMOUNT\n")
+			}
+			if stringArray[0]=="NEWUSER" {
+				numUsers := 0
+				for i :=0; i<len(Blockchain); i++ {
+					if Blockchain[i].UserId>numUsers {
+						numUsers = Blockchain[i].UserId
+					}
+				}
+		
+				userId:=numUsers+1
+				newBlock, err := generateBlock(Blockchain[len(Blockchain)-1], userId,0,NEW_ACCOUNT,0)
+				colorize(ColorYellow,"New User account with UserId="+strconv.Itoa(userId)+" is created")
+
+				if isBlockValid(newBlock, Blockchain[len(Blockchain)-1]) {
+					mutex.Lock()
+					Blockchain = append(Blockchain, newBlock)
+					mutex.Unlock()
+				}
+
+				bytes, err := json.Marshal(Blockchain)
+				if err != nil {
+					log.Println(err)
+				}
+
+				spew.Dump(Blockchain)
+
+				mutex.Lock()
+				rw.WriteString(fmt.Sprintf("%s\n", string(bytes)))
+				rw.Flush()
+				mutex.Unlock()
+			}
+			if stringArray[0]=="RECHARGE" {
+				colorize(ColorBlue,"REcharge\n")
+				userId, err := strconv.Atoi(stringArray[1])
+				if err !=nil {
+					colorize(ColorRed,"userID must be a number\n")
+					log.Fatal(err)
+				} else {
+					userFound:=false
+					balance:=0
+					for i :=len(Blockchain)-1; i>=0; i-- {
+						if Blockchain[i].UserId==userId {
+							userFound = true
+							balance= Blockchain[i].Balance
+							break
+						}
+					}
+					if userFound==true {
+						amount, err := strconv.Atoi(stringArray[2])
+						if err !=nil {
+							colorize(ColorRed,"Amount must be a number\n")
+							log.Fatal(err)
+						} else if amount <0 {
+							colorize(ColorRed,"Amount must be a positive number\n")
+						} else{
+							balance=balance+amount
+							newBlock, err := generateBlock(Blockchain[len(Blockchain)-1], userId,balance,CREDIT,amount)
+							colorize(ColorYellow,"Amount Credited")
+
+							if isBlockValid(newBlock, Blockchain[len(Blockchain)-1]) {
+								mutex.Lock()
+								Blockchain = append(Blockchain, newBlock)
+								mutex.Unlock()
+							}
+
+							bytes, err := json.Marshal(Blockchain)
+							if err != nil {
+								log.Println(err)
+							}
+
+							spew.Dump(Blockchain)
+
+							mutex.Lock()
+							rw.WriteString(fmt.Sprintf("%s\n", string(bytes)))
+							rw.Flush()
+							mutex.Unlock()
+						}
+					} else {
+						colorize(ColorRed,"Account with given userID not found\n")
+					}
+				}
+			}
+		} else {
+			//Retail type POS
+			if stringArray[0]!= "DEBIT"  {
+				colorize(ColorRed,"Invalid Command. This is Retail POS. Valid commands are: 1.) DEBIT $USERID $AMOUNT\n")
+			} else{
+				userId, err := strconv.Atoi(stringArray[1])
+				if err !=nil {
+					colorize(ColorRed,"userID must be a number\n")
+					log.Fatal(err)
+				} else {
+					userFound:=false
+					balance:=0
+					for i :=len(Blockchain)-1; i>=0; i-- {
+						if Blockchain[i].UserId==userId {
+							userFound = true
+							balance= Blockchain[i].Balance
+							break
+						}
+					}
+					if userFound==true {
+						amount, err := strconv.Atoi(stringArray[2])
+						if err !=nil {
+							colorize(ColorRed,"Amount must be a number\n")
+							log.Fatal(err)
+						} else if amount <0 {
+							colorize(ColorRed,"Amount must be a positive number\n")
+						} else if balance<amount{
+							colorize(ColorRed,"Balance less than debit amount\n")
+						} else{
+							balance:=balance-amount
+							newBlock, err := generateBlock(Blockchain[len(Blockchain)-1], userId,balance,DEBIT,amount)
+							colorize(ColorYellow,"Amount Debitted")
+
+							if isBlockValid(newBlock, Blockchain[len(Blockchain)-1]) {
+								mutex.Lock()
+								Blockchain = append(Blockchain, newBlock)
+								mutex.Unlock()
+							}
+
+							bytes, err := json.Marshal(Blockchain)
+							if err != nil {
+								log.Println(err)
+							}
+
+							spew.Dump(Blockchain)
+
+							mutex.Lock()
+							rw.WriteString(fmt.Sprintf("%s\n", string(bytes)))
+							rw.Flush()
+							mutex.Unlock()
+						}
+					} else {
+						colorize(ColorRed,"Account with given userID not found\n")
+					}
+				}
+			}
 		}
-		log.Println(string(bpm))
-		var userId=0
-		var  balance=0
-		var amount=0
-		newBlock, err := generateBlock(Blockchain[len(Blockchain)-1], userId,balance,DEBIT,amount)
-
-		if isBlockValid(newBlock, Blockchain[len(Blockchain)-1]) {
-			mutex.Lock()
-			Blockchain = append(Blockchain, newBlock)
-			mutex.Unlock()
-		}
-
-		bytes, err := json.Marshal(Blockchain)
-		if err != nil {
-			log.Println(err)
-		}
-
-		spew.Dump(Blockchain)
-
-		mutex.Lock()
-		rw.WriteString(fmt.Sprintf("%s\n", string(bytes)))
-		rw.Flush()
-		mutex.Unlock()
 	}
 
 }
@@ -260,7 +413,39 @@ func replaceChain(newBlocks []Block) {
 	}
 }
 
+func colorize(color Color, message string) {
+    fmt.Println(string(color), message, string(ColorReset))
+}
+
 func main() {
+
+	// Parse options from the command line
+	listenF := flag.Int("l", 0, "wait for incoming connections")
+	target := flag.String("d", "", "target peer to dial")
+	secio := flag.Bool("secio", false, "enable secio")
+	seed := flag.Int64("seed", 0, "set random seed for id generation")
+	//isCash :=flag.Bool("CASH",false,"Is the POS cash type")
+	//isRetail :=flag.Bool("RETAIL",false,"Is the POS retail type")
+	flag.Parse()
+
+	// if *isCash==false && *isRetail == false {
+	// 	log.Fatal("Please provide either -CASH or -RETAIL flag")
+	// 	return
+	// }
+
+	// if *isCash==true && *isRetail == true {
+	// 	log.Fatal("Please pass only one -CASH or -RETAIL flag")
+	// 	return
+	// }
+
+	// if *isCash==true {
+	// 	colorize(ColorBlue, "This is a Cash POS terminal")
+	// }
+
+	// if *isRetail==true {
+	// 	colorize(ColorBlue, "This is a Retail POS terminal")
+	// }
+
 	err := godotenv.Load()
 	if err != nil {
 		log.Fatal(err)
@@ -276,12 +461,6 @@ func main() {
 	if err==nil {
 		golog.SetAllLoggers(lvl) // Change to DEBUG for extra info
 	}
-	// Parse options from the command line
-	listenF := flag.Int("l", 0, "wait for incoming connections")
-	target := flag.String("d", "", "target peer to dial")
-	secio := flag.Bool("secio", false, "enable secio")
-	seed := flag.Int64("seed", 0, "set random seed for id generation")
-	flag.Parse()
 
 	if *listenF == 0 {
 		log.Fatal("Please provide a port to bind on with -l")
